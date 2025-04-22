@@ -90,7 +90,7 @@ def build_vocabulary(spacy_de, spacy_en):
         return tokenize(text, spacy_en)
 
     print("Building German Vocabulary ...")
-    train, val, test = load_local_dataset('datasets/Mulki30k')
+    train, val, test = load_local_dataset('datasets/Multi30k')
     all_de = []
     for dataset in [train, val, test]:
         for item in dataset:
@@ -258,6 +258,14 @@ def create_dataloaders(
     return train_dataloader, valid_dataloader
 
 
+def get_device():
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    elif torch.backends.mps.is_available():
+        return torch.device('mps')
+    else:
+        return torch.device('cpu')
+
 # Training the System
 def train_worker(
     gpu,
@@ -269,11 +277,8 @@ def train_worker(
     config,
     is_distributed=False,
 ):
-    print(f"Train worker process using {'GPU: ' + str(gpu) if torch.cuda.is_available() else 'CPU'} for training", flush=True)
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    if torch.cuda.is_available():
-        torch.cuda.set_device(gpu)
+    device = get_device()
+    print(f"Train worker process using device: {device} for training", flush=True)
 
     pad_idx = vocab_tgt["<blank>"]
     d_model = 512
@@ -281,6 +286,8 @@ def train_worker(
     model.to(device)
     module = model
     is_main_process = True
+    
+    # 只有在使用 CUDA 时才使用分布式训练
     if is_distributed and torch.cuda.is_available():
         dist.init_process_group(
             "nccl", init_method="env://", rank=gpu, world_size=ngpus_per_node
@@ -359,20 +366,25 @@ def train_worker(
 
 
 def train_distributed_model(vocab_src, vocab_tgt, spacy_de, spacy_en, config):
-    if torch.cuda.is_available():
-        ngpus = torch.cuda.device_count()
-        os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = "12356"
-        print(f"Number of GPUs detected: {ngpus}")
-        print("Spawning training processes ...")
-        mp.spawn(
-            train_worker,
-            nprocs=ngpus,
-            args=(ngpus, vocab_src, vocab_tgt, spacy_de, spacy_en, config, True),
-        )
-    else:
-        print("No GPU detected, running on CPU...")
+    if torch.backends.mps.is_available():
+        print("Using MPS (Metal Performance Shaders) for Apple Silicon")
         train_worker(0, 1, vocab_src, vocab_tgt, spacy_de, spacy_en, config, False)
+        return
+    elif not torch.cuda.is_available():
+        print("CUDA is not available. Running on CPU only.")
+        train_worker(0, 1, vocab_src, vocab_tgt, spacy_de, spacy_en, config, False)
+        return
+
+    ngpus = torch.cuda.device_count()
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12356"
+    print(f"Number of GPUs detected: {ngpus}")
+    print("Spawning training processes ...")
+    mp.spawn(
+        train_worker,
+        nprocs=ngpus,
+        args=(ngpus, vocab_src, vocab_tgt, spacy_de, spacy_en, config, True),
+    )
 
 
 def train_model(vocab_src, vocab_tgt, spacy_de, spacy_en, config):
@@ -387,8 +399,9 @@ def train_model(vocab_src, vocab_tgt, spacy_de, spacy_en, config):
 
 
 def load_trained_model():
+    device = get_device()
     config = {
-        "batch_size": 32,
+        "batch_size": 16 if device.type == 'mps' else 32,  # 减小 MPS 设备的批次大小
         "distributed": False,
         "num_epochs": 8,
         "accum_iter": 10,
@@ -396,14 +409,14 @@ def load_trained_model():
         "max_padding": 72,
         "warmup": 3000,
         "file_prefix": "multi30k_model_",
-        "device": "cuda" if torch.cuda.is_available() else "cpu"
     }
     model_path = "multi30k_model_final.pt"
     if not exists(model_path):
         train_model(vocab_src, vocab_tgt, spacy_de, spacy_en, config)
 
     model = make_model(len(vocab_src), len(vocab_tgt), N=6)
-    model.load_state_dict(torch.load("multi30k_model_final.pt", map_location=config["device"]))
+    model.load_state_dict(torch.load("multi30k_model_final.pt", map_location=device))
+    model.to(device)
     return model
 
 

@@ -138,6 +138,14 @@ def penalization_visualization():
 
 
 if __name__ == "__main__":
-    # example_learning_schedule()
-    example_label_smoothing()
-    penalization_visualization()
+    # 保存学习率调度可视化
+    lr_chart = example_learning_schedule()
+    lr_chart.save('learning_rate_schedule.html')
+    
+    # 保存标签平滑可视化
+    ls_chart = example_label_smoothing()
+    ls_chart.save('label_smoothing.html')
+    
+    # 保存惩罚可视化
+    penalty_chart = penalization_visualization()
+    penalty_chart.save('penalization.html')

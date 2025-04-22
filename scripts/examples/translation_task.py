@@ -7,17 +7,17 @@ We also show how to use multi-gpu processing to make it really fast.
 """
 import os
 from os.path import exists
+import glob
 
 import GPUtil
 import spacy
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-import torchtext.datasets as datasets
 from torch.nn.functional import pad
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import LambdaLR
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from torchtext.data.functional import to_map_style_dataset
 from torchtext.vocab import build_vocab_from_iterator
@@ -29,7 +29,6 @@ from src.models.transformer import make_model
 
 # Load spacy tokenizer models, download them if they haven't been
 # downloaded already
-
 def load_tokenizers():
 
     try:
@@ -50,10 +49,37 @@ def tokenize(text, tokenizer):
     return [tok.text for tok in tokenizer.tokenizer(text)]
 
 
-def yield_tokens(data_iter, tokenizer, index):
-    for from_to_tuple in data_iter:
-        yield tokenizer(from_to_tuple[index])
+def yield_tokens(texts, tokenizer, index):
+    for text in texts:
+        yield tokenizer(text)
 
+
+class Multi30kDataset(Dataset):
+    def __init__(self, de_file, en_file):
+        with open(de_file, 'r', encoding='utf-8') as f:
+            self.de_data = f.readlines()
+        with open(en_file, 'r', encoding='utf-8') as f:
+            self.en_data = f.readlines()
+        
+    def __len__(self):
+        return len(self.de_data)
+    
+    def __getitem__(self, idx):
+        return self.de_data[idx].strip(), self.en_data[idx].strip()
+
+def load_local_dataset(root_dir):
+    train_de = os.path.join(root_dir, 'train.de')
+    train_en = os.path.join(root_dir, 'train.en')
+    val_de = os.path.join(root_dir, 'val.de')
+    val_en = os.path.join(root_dir, 'val.en')
+    test_de = os.path.join(root_dir, 'test.de')
+    test_en = os.path.join(root_dir, 'test.en')
+    
+    train_dataset = Multi30kDataset(train_de, train_en)
+    val_dataset = Multi30kDataset(val_de, val_en)
+    test_dataset = Multi30kDataset(test_de, test_en)
+    
+    return train_dataset, val_dataset, test_dataset
 
 
 def build_vocabulary(spacy_de, spacy_en):
@@ -64,17 +90,26 @@ def build_vocabulary(spacy_de, spacy_en):
         return tokenize(text, spacy_en)
 
     print("Building German Vocabulary ...")
-    train, val, test = datasets.Multi30k(language_pair=("de", "en"))
+    train, val, test = load_local_dataset('datasets/Mulki30k')
+    all_de = []
+    for dataset in [train, val, test]:
+        for item in dataset:
+            all_de.append(item[0])
+    
     vocab_src = build_vocab_from_iterator(
-        yield_tokens(train + val + test, tokenize_de, index=0),
+        yield_tokens(all_de, tokenize_de, index=0),
         min_freq=2,
         specials=["<s>", "</s>", "<blank>", "<unk>"],
     )
 
     print("Building English Vocabulary ...")
-    train, val, test = datasets.Multi30k(language_pair=("de", "en"))
+    all_en = []
+    for dataset in [train, val, test]:
+        for item in dataset:
+            all_en.append(item[1])
+            
     vocab_tgt = build_vocab_from_iterator(
-        yield_tokens(train + val + test, tokenize_en, index=1),
+        yield_tokens(all_en, tokenize_en, index=0),
         min_freq=2,
         specials=["<s>", "</s>", "<blank>", "<unk>"],
     )
@@ -175,7 +210,6 @@ def create_dataloaders(
     max_padding=128,
     is_distributed=True,
 ):
-    # def create_dataloaders(batch_size=12000):
     def tokenize_de(text):
         return tokenize(text, spacy_de)
 
@@ -194,13 +228,11 @@ def create_dataloaders(
             pad_id=vocab_src.get_stoi()["<blank>"],
         )
 
-    train_iter, valid_iter, test_iter = datasets.Multi30k(
-        language_pair=("de", "en")
-    )
+    train_iter, valid_iter, test_iter = load_local_dataset('datasets/Mulki30k')
 
     train_iter_map = to_map_style_dataset(
         train_iter
-    )  # DistributedSampler needs a dataset len()
+    )
     train_sampler = (
         DistributedSampler(train_iter_map) if is_distributed else None
     )
@@ -237,16 +269,19 @@ def train_worker(
     config,
     is_distributed=False,
 ):
-    print(f"Train worker process using GPU: {gpu} for training", flush=True)
-    torch.cuda.set_device(gpu)
+    print(f"Train worker process using {'GPU: ' + str(gpu) if torch.cuda.is_available() else 'CPU'} for training", flush=True)
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if torch.cuda.is_available():
+        torch.cuda.set_device(gpu)
 
     pad_idx = vocab_tgt["<blank>"]
     d_model = 512
     model = make_model(len(vocab_src), len(vocab_tgt), N=6)
-    model.cuda(gpu)
+    model.to(device)
     module = model
     is_main_process = True
-    if is_distributed:
+    if is_distributed and torch.cuda.is_available():
         dist.init_process_group(
             "nccl", init_method="env://", rank=gpu, world_size=ngpus_per_node
         )
@@ -257,17 +292,17 @@ def train_worker(
     criterion = LabelSmoothing(
         size=len(vocab_tgt), padding_idx=pad_idx, smoothing=0.1
     )
-    criterion.cuda(gpu)
+    criterion.to(device)
 
     train_dataloader, valid_dataloader = create_dataloaders(
-        gpu,
+        device,
         vocab_src,
         vocab_tgt,
         spacy_de,
         spacy_en,
-        batch_size=config["batch_size"] // ngpus_per_node,
+        batch_size=config["batch_size"] // (ngpus_per_node if torch.cuda.is_available() else 1),
         max_padding=config["max_padding"],
-        is_distributed=is_distributed,
+        is_distributed=is_distributed and torch.cuda.is_available(),
     )
 
     optimizer = torch.optim.Adam(
@@ -282,7 +317,7 @@ def train_worker(
     train_state = TrainState()
 
     for epoch in range(config["num_epochs"]):
-        if is_distributed:
+        if is_distributed and torch.cuda.is_available():
             train_dataloader.sampler.set_epoch(epoch)
             valid_dataloader.sampler.set_epoch(epoch)
 
@@ -324,17 +359,20 @@ def train_worker(
 
 
 def train_distributed_model(vocab_src, vocab_tgt, spacy_de, spacy_en, config):
-
-    ngpus = torch.cuda.device_count()
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "12356"
-    print(f"Number of GPUs detected: {ngpus}")
-    print("Spawning training processes ...")
-    mp.spawn(
-        train_worker,
-        nprocs=ngpus,
-        args=(ngpus, vocab_src, vocab_tgt, spacy_de, spacy_en, config, True),
-    )
+    if torch.cuda.is_available():
+        ngpus = torch.cuda.device_count()
+        os.environ["MASTER_ADDR"] = "localhost"
+        os.environ["MASTER_PORT"] = "12356"
+        print(f"Number of GPUs detected: {ngpus}")
+        print("Spawning training processes ...")
+        mp.spawn(
+            train_worker,
+            nprocs=ngpus,
+            args=(ngpus, vocab_src, vocab_tgt, spacy_de, spacy_en, config, True),
+        )
+    else:
+        print("No GPU detected, running on CPU...")
+        train_worker(0, 1, vocab_src, vocab_tgt, spacy_de, spacy_en, config, False)
 
 
 def train_model(vocab_src, vocab_tgt, spacy_de, spacy_en, config):
@@ -358,13 +396,14 @@ def load_trained_model():
         "max_padding": 72,
         "warmup": 3000,
         "file_prefix": "multi30k_model_",
+        "device": "cuda" if torch.cuda.is_available() else "cpu"
     }
     model_path = "multi30k_model_final.pt"
     if not exists(model_path):
         train_model(vocab_src, vocab_tgt, spacy_de, spacy_en, config)
 
     model = make_model(len(vocab_src), len(vocab_tgt), N=6)
-    model.load_state_dict(torch.load("multi30k_model_final.pt"))
+    model.load_state_dict(torch.load("multi30k_model_final.pt", map_location=config["device"]))
     return model
 
 

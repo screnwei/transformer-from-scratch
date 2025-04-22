@@ -398,29 +398,12 @@ def train_model(vocab_src, vocab_tgt, spacy_de, spacy_en, config):
         )
 
 
-def load_trained_model():
-    device = get_device()
-    config = {
-        "batch_size": 16 if device.type == 'mps' else 32,  # 减小 MPS 设备的批次大小
-        "distributed": False,
-        "num_epochs": 8,
-        "accum_iter": 10,
-        "base_lr": 1.0,
-        "max_padding": 72,
-        "warmup": 3000,
-        "file_prefix": "multi30k_model_",
-    }
-    model_path = "multi30k_model_final.pt"
-    if not exists(model_path):
-        train_model(vocab_src, vocab_tgt, spacy_de, spacy_en, config)
+# def load_trained_model():
+#     model = make_model(len(vocab_src), len(vocab_tgt), N=6)
+#     model.load_state_dict(torch.load("multi30k_model_final.pt", map_location=device))
+#     model.to(device)
+#     return model
 
-    model = make_model(len(vocab_src), len(vocab_tgt), N=6)
-    model.load_state_dict(torch.load("multi30k_model_final.pt", map_location=device))
-    model.to(device)
-    return model
-
-
-# model = load_trained_model()
 
 if __name__ == '__main__':
     device = get_device()

@@ -1,54 +1,46 @@
 import torch
 
-from scripts.examples.translation_task import (
+from scripts.examples.translation_de2en.translation_task import (
     load_tokenizers,
-    load_vocab,
     get_device,
 )
-from src.models.transformer import make_model
+from src.models.transformer import make_model, greedy_decode
 
+
+def load_vocab(vocab_path):
+    vocab_src, vocab_tgt = torch.load(vocab_path)
+    print(f"Source vocabulary size: {len(vocab_src)}")
+    print(f"Target vocabulary size: {len(vocab_tgt)}")
+    return vocab_src, vocab_tgt
 
 def load_model(model_path, vocab_src, vocab_tgt):
     """加载训练好的模型"""
     device = get_device()
-    model = make_model(len(vocab_src), len(vocab_tgt), N=6)
+    model = make_model(len(vocab_src), len(vocab_tgt))
+    # 从指定路径加载模型参数到指定设备
     model.load_state_dict(torch.load(model_path, map_location=device))
+    # 将模型移动到指定设备(CPU/GPU)
     model.to(device)
+    # 设置模型为评估模式，关闭dropout等训练时使用的功能
     model.eval()
     return model
 
-
-def greedy_decode(model, src, src_mask, max_len, start_symbol):
-    """使用贪心算法进行解码"""
-    memory = model.encode(src, src_mask)
-    ys = torch.ones(1, 1).fill_(start_symbol).type_as(src.data)
-    for i in range(max_len - 1):
-        out = model.decode(
-            memory, src_mask,
-            ys,
-            subsequent_mask(ys.size(1)).type_as(src.data)
-        )
-        prob = model.generator(out[:, -1])
-        _, next_word = torch.max(prob, dim=1)
-        next_word = next_word.data[0]
-        ys = torch.cat([ys,
-                        torch.ones(1, 1).type_as(src.data).fill_(next_word)], dim=1)
-    return ys
-
-
-def subsequent_mask(size):
-    """创建掩码矩阵"""
-    attn_shape = (1, size, size)
-    subsequent_mask = torch.triu(torch.ones(attn_shape), diagonal=1).type(
-        torch.uint8
-    )
-    return subsequent_mask == 0
-
-
 def translate(model, src_sentence, vocab_src, vocab_tgt, spacy_de, spacy_en):
+    """
+    参数:
+        model: 训练好的Transformer模型
+        src_sentence: 待翻译的源语言句子
+        vocab_src: 源语言词表
+        vocab_tgt: 目标语言词表
+        spacy_de: 德语分词器
+        spacy_en: 英语分词器
+        
+    返回:
+        translation: 翻译后的目标语言句子
+    """
     """翻译单个句子"""
     device = get_device()
-    model.eval()
+    # model.eval()
 
     # 对输入句子进行分词
     src_tokens = [tok.text for tok in spacy_de.tokenizer(src_sentence)]
@@ -79,8 +71,11 @@ def translate(model, src_sentence, vocab_src, vocab_tgt, spacy_de, spacy_en):
 def main():
     # 加载必要的组件
     spacy_de, spacy_en = load_tokenizers()
-    vocab_src, vocab_tgt = load_vocab(spacy_de, spacy_en)
-    model = load_model("scripts/examples/multi30k_model_final.pt", vocab_src, vocab_tgt)
+    vocab_src, vocab_tgt = load_vocab("scripts/examples/translation_de2en/vocab.pt")
+    model = load_model("scripts/examples/translation_de2en/multi30k_model_final.pt", vocab_src, vocab_tgt)
+    # Print the total number of parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Total number of parameters in the model: {total_params:,}")
 
     # 测试句子
     test_sentences = [

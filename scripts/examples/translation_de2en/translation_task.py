@@ -1,14 +1,13 @@
 """
-Now we consider a real-world example using the Opus Books English-Chinese Translation task.
+Now we consider a real-world example using the Multi30k German-English Translation task.
 This task is much smaller than the WMT task considered in the paper, but it illustrates the whole system.
-We also show how to use hardware acceleration to make it really fast.
+We also show how to use multi-gpu processing to make it really fast.
 
-现在我们考虑一个使用 Opus Books 英中翻译任务的现实世界示例。这个任务比论文中考虑的 WMT 任务要小得多，但它说明了整个系统。我们还展示了如何使用硬件加速来使其真正快速。
-
-执行脚本：PYTORCH_ENABLE_MPS_FALLBACK=1 PYTHONPATH=$PYTHONPATH:. python scripts/examples/translation_task_modified.py
+现在我们考虑一个使用 Multi30k 德英翻译任务的现实世界示例。这个任务比论文中考虑的 WMT 任务要小得多，但它说明了整个系统。我们还展示了如何使用多 GPU 处理来使其真正快速。
 """
 import os
 from os.path import exists
+import glob
 
 import GPUtil
 import spacy
@@ -18,94 +17,101 @@ import torch.multiprocessing as mp
 from torch.nn.functional import pad
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import LambdaLR
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
+from torchtext.data.functional import to_map_style_dataset
 from torchtext.vocab import build_vocab_from_iterator
-from datasets import load_dataset
-import jieba
 
 from scripts.train import LabelSmoothing, rate, TrainState, run_epoch, Batch, SimpleLossCompute, DummyOptimizer, \
     DummyScheduler
 from src.models.transformer import make_model
 
-# 检查是否可以使用 MPS
-def get_device():
-    if torch.backends.mps.is_available():
-        # return torch.device("mps")
-        return torch.device("cpu")
-    elif torch.cuda.is_available():
-        return torch.device("cuda")
-    else:
-        return torch.device("cpu")
 
+class Multi30kDataset(Dataset):
+    def __init__(self, de_file, en_file):
+        with open(de_file, 'r', encoding='utf-8') as f:
+            self.de_data = f.readlines()
+        with open(en_file, 'r', encoding='utf-8') as f:
+            self.en_data = f.readlines()
 
+    def __len__(self):
+        return len(self.de_data)
+
+    def __getitem__(self, idx):
+        return self.de_data[idx].strip(), self.en_data[idx].strip()
+
+# Load spacy tokenizer models, download them if they haven't been
+# downloaded already
 def load_tokenizers():
+
+    try:
+        spacy_de = spacy.load("de_core_news_sm")
+    except IOError:
+        os.system("python -m spacy download de_core_news_sm")
+        spacy_de = spacy.load("de_core_news_sm")
+
     try:
         spacy_en = spacy.load("en_core_web_sm")
     except IOError:
         os.system("python -m spacy download en_core_web_sm")
         spacy_en = spacy.load("en_core_web_sm")
 
-    # 中文不需要加载 spacy 模型，我们使用 jieba
-    return spacy_en
+    return spacy_de, spacy_en
 
-
-def tokenize_english(text, tokenizer):
+def tokenize(text, tokenizer):
     return [tok.text for tok in tokenizer.tokenizer(text)]
 
-def tokenize_chinese(text):
-    return list(jieba.cut(text))
+
+def yield_tokens(texts, tokenizer, index):
+    for text in texts:
+        yield tokenizer(text)
 
 
-class OpusBooksDataset(Dataset):
-    def __init__(self, split, tokenizer_en):
-        full_dataset = load_dataset("opus100", "en-zh", split="train")
-        # 将数据集分割成训练集(80%)和验证集(20%)
-        if split == "train":
-            self.dataset = full_dataset.train_test_split(test_size=0.2, seed=42)["train"]
-        elif split == "validation":
-            self.dataset = full_dataset.train_test_split(test_size=0.2, seed=42)["test"]
-        else:
-            raise ValueError(f"Unknown split {split}")
-            
-        self.tokenizer_en = tokenizer_en
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, idx):
-        item = self.dataset[idx]
-        return item['translation']['en'], item['translation']['zh']
 
 
-def yield_tokens(dataset, tokenizer, index):
-    for item in dataset:
-        if index == 0:  # English
-            yield tokenizer(item[index])
-        else:  # Chinese
-            yield tokenize_chinese(item[index])
-
-
-def build_vocabulary(spacy_en):
-    def tokenize_en_wrapper(text):
-        return tokenize_english(text, spacy_en)
-
-    print("Building English Vocabulary ...")
-    train_dataset = OpusBooksDataset("train", tokenize_en_wrapper)
-    val_dataset = OpusBooksDataset("validation", tokenize_en_wrapper)
+def load_local_dataset(root_dir):
+    train_de = os.path.join(root_dir, 'train.de')
+    train_en = os.path.join(root_dir, 'train.en')
+    val_de = os.path.join(root_dir, 'val.de')
+    val_en = os.path.join(root_dir, 'val.en')
+    test_de = os.path.join(root_dir, 'test.de')
+    test_en = os.path.join(root_dir, 'test.en')
     
-    all_data = [(item[0], item[1]) for item in train_dataset] + \
-             [(item[0], item[1]) for item in val_dataset]
+    train_dataset = Multi30kDataset(train_de, train_en)
+    val_dataset = Multi30kDataset(val_de, val_en)
+    test_dataset = Multi30kDataset(test_de, test_en)
+    
+    return train_dataset, val_dataset, test_dataset
+
+
+def build_vocabulary(spacy_de, spacy_en):
+    def tokenize_de(text):
+        return tokenize(text, spacy_de)
+
+    def tokenize_en(text):
+        return tokenize(text, spacy_en)
+
+    print("Building German Vocabulary ...")
+    train, val, test = load_local_dataset('datasets/Multi30k')
+    all_de = []
+    for dataset in [train, val, test]:
+        for item in dataset:
+            all_de.append(item[0])
     
     vocab_src = build_vocab_from_iterator(
-        yield_tokens(all_data, tokenize_en_wrapper, index=0),
+        yield_tokens(all_de, tokenize_de, index=0),
         min_freq=2,
         specials=["<s>", "</s>", "<blank>", "<unk>"],
     )
 
-    print("Building Chinese Vocabulary ...")
+    print("Building English Vocabulary ...")
+    all_en = []
+    for dataset in [train, val, test]:
+        for item in dataset:
+            all_en.append(item[1])
+            
     vocab_tgt = build_vocab_from_iterator(
-        yield_tokens(all_data, None, index=1),
+        yield_tokens(all_en, tokenize_en, index=0),
         min_freq=2,
         specials=["<s>", "</s>", "<blank>", "<unk>"],
     )
@@ -116,21 +122,23 @@ def build_vocabulary(spacy_en):
     return vocab_src, vocab_tgt
 
 
-def load_vocab(spacy_en):
-    if not exists("vocab_en_zh.pt"):
-        vocab_src, vocab_tgt = build_vocabulary(spacy_en)
-        torch.save((vocab_src, vocab_tgt), "vocab_en_zh.pt")
+def load_vocab(spacy_de, spacy_en):
+    if not exists("vocab.pt"):
+        vocab_src, vocab_tgt = build_vocabulary(spacy_de, spacy_en)
+        torch.save((vocab_src, vocab_tgt), "vocab.pt")
     else:
-        vocab_src, vocab_tgt = torch.load("vocab_en_zh.pt")
-    print("Finished.\nVocabulary sizes:")
-    print(f"English vocabulary size: {len(vocab_src)}")
-    print(f"Chinese vocabulary size: {len(vocab_tgt)}")
+        vocab_src, vocab_tgt = torch.load("vocab.pt")
+    print(f"Source vocabulary size: {len(vocab_src)}")
+    print(f"Target vocabulary size: {len(vocab_tgt)}")
     return vocab_src, vocab_tgt
 
 
-spacy_en = load_tokenizers()
-vocab_src, vocab_tgt = load_vocab(spacy_en)
 
+"""
+Batching matters a ton for speed. We want to have very evenly divided batches, with absolutely minimal padding. 
+To do this we have to hack a bit around the default torchtext batching. 
+This code patches their default batching to make sure we search over enough sentences to find tight batches.
+"""
 def collate_batch(
     batch,
     src_pipeline,
@@ -161,7 +169,7 @@ def collate_batch(
             [
                 bs_id,
                 torch.tensor(
-                    tgt_vocab(tokenize_chinese(_tgt)),
+                    tgt_vocab(tgt_pipeline(_tgt)),
                     dtype=torch.int64,
                     device=device,
                 ),
@@ -170,9 +178,13 @@ def collate_batch(
             0,
         )
         src_list.append(
+            # warning - overwrites values for negative values of padding - len
             pad(
                 processed_src,
-                (0, max_padding - len(processed_src)),
+                (
+                    0,
+                    max_padding - len(processed_src),
+                ),
                 value=pad_id,
             )
         )
@@ -188,24 +200,27 @@ def collate_batch(
     tgt = torch.stack(tgt_list)
     return (src, tgt)
 
-
 def create_dataloaders(
     device,
     vocab_src,
     vocab_tgt,
+    spacy_de,
     spacy_en,
     batch_size=12000,
     max_padding=128,
     is_distributed=True,
 ):
-    def tokenize_en_wrapper(text):
-        return tokenize_english(text, spacy_en)
+    def tokenize_de(text):
+        return tokenize(text, spacy_de)
+
+    def tokenize_en(text):
+        return tokenize(text, spacy_en)
 
     def collate_fn(batch):
         return collate_batch(
             batch,
-            tokenize_en_wrapper,
-            None,
+            tokenize_de,
+            tokenize_en,
             vocab_src,
             vocab_tgt,
             device,
@@ -213,25 +228,28 @@ def create_dataloaders(
             pad_id=vocab_src.get_stoi()["<blank>"],
         )
 
-    train_dataset = OpusBooksDataset("train", tokenize_en_wrapper)
-    valid_dataset = OpusBooksDataset("validation", tokenize_en_wrapper)
+    train_iter, valid_iter, test_iter = load_local_dataset('datasets/Multi30k')
 
-    train_sampler = (
-        DistributedSampler(train_dataset) if is_distributed else None
+    train_iter_map = to_map_style_dataset(
+        train_iter
     )
+    train_sampler = (
+        DistributedSampler(train_iter_map) if is_distributed else None
+    )
+    valid_iter_map = to_map_style_dataset(valid_iter)
     valid_sampler = (
-        DistributedSampler(valid_dataset) if is_distributed else None
+        DistributedSampler(valid_iter_map) if is_distributed else None
     )
 
     train_dataloader = DataLoader(
-        train_dataset,
+        train_iter_map,
         batch_size=batch_size,
         shuffle=(train_sampler is None),
         sampler=train_sampler,
         collate_fn=collate_fn,
     )
     valid_dataloader = DataLoader(
-        valid_dataset,
+        valid_iter_map,
         batch_size=batch_size,
         shuffle=(valid_sampler is None),
         sampler=valid_sampler,
@@ -240,11 +258,21 @@ def create_dataloaders(
     return train_dataloader, valid_dataloader
 
 
+def get_device():
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    elif torch.backends.mps.is_available():
+        return torch.device('mps')
+    else:
+        return torch.device('cpu')
+
+# Training the System
 def train_worker(
     gpu,
     ngpus_per_node,
     vocab_src,
     vocab_tgt,
+    spacy_de,
     spacy_en,
     config,
     is_distributed=False,
@@ -254,7 +282,7 @@ def train_worker(
 
     pad_idx = vocab_tgt["<blank>"]
     d_model = 512
-    model = make_model(len(vocab_src), len(vocab_tgt), N=6)
+    model = make_model(len(vocab_src), len(vocab_tgt))
     model.to(device)
     module = model
     is_main_process = True
@@ -277,6 +305,7 @@ def train_worker(
         device,
         vocab_src,
         vocab_tgt,
+        spacy_de,
         spacy_en,
         batch_size=config["batch_size"] // (ngpus_per_node if torch.cuda.is_available() else 1),
         max_padding=config["max_padding"],
@@ -300,7 +329,7 @@ def train_worker(
             valid_dataloader.sampler.set_epoch(epoch)
 
         model.train()
-        print(f"[Device {device}] Epoch {epoch} Training ====", flush=True)
+        print(f"[GPU{gpu}] Epoch {epoch} Training ====", flush=True)
         _, train_state = run_epoch(
             (Batch(b[0], b[1], pad_idx) for b in train_dataloader),
             model,
@@ -312,11 +341,13 @@ def train_worker(
             train_state=train_state,
         )
 
+        GPUtil.showUtilization()
         if is_main_process:
             file_path = "%s%.2d.pt" % (config["file_prefix"], epoch)
             torch.save(module.state_dict(), file_path)
+        torch.cuda.empty_cache()
 
-        print(f"[Device {device}] Epoch {epoch} Validation ====", flush=True)
+        print(f"[GPU{gpu}] Epoch {epoch} Validation ====", flush=True)
         model.eval()
         sloss = run_epoch(
             (Batch(b[0], b[1], pad_idx) for b in valid_dataloader),
@@ -327,20 +358,21 @@ def train_worker(
             mode="eval",
         )
         print(sloss)
+        torch.cuda.empty_cache()
 
     if is_main_process:
         file_path = "%sfinal.pt" % config["file_prefix"]
         torch.save(module.state_dict(), file_path)
 
 
-def train_distributed_model(vocab_src, vocab_tgt, spacy_en, config):
+def train_distributed_model(vocab_src, vocab_tgt, spacy_de, spacy_en, config):
     if torch.backends.mps.is_available():
         print("Using MPS (Metal Performance Shaders) for Apple Silicon")
-        train_worker(0, 1, vocab_src, vocab_tgt, spacy_en, config, False)
+        train_worker(0, 1, vocab_src, vocab_tgt, spacy_de, spacy_en, config, False)
         return
     elif not torch.cuda.is_available():
         print("CUDA is not available. Running on CPU only.")
-        train_worker(0, 1, vocab_src, vocab_tgt, spacy_en, config, False)
+        train_worker(0, 1, vocab_src, vocab_tgt, spacy_de, spacy_en, config, False)
         return
 
     ngpus = torch.cuda.device_count()
@@ -351,42 +383,43 @@ def train_distributed_model(vocab_src, vocab_tgt, spacy_en, config):
     mp.spawn(
         train_worker,
         nprocs=ngpus,
-        args=(ngpus, vocab_src, vocab_tgt, spacy_en, config, True),
+        args=(ngpus, vocab_src, vocab_tgt, spacy_de, spacy_en, config, True),
     )
 
 
-def train_model(vocab_src, vocab_tgt, spacy_en, config):
-    if config["distributed"] and not torch.backends.mps.is_available():
+def train_model(vocab_src, vocab_tgt, spacy_de, spacy_en, config):
+    if config["distributed"]:
         train_distributed_model(
-            vocab_src, vocab_tgt, spacy_en, config
+            vocab_src, vocab_tgt, spacy_de, spacy_en, config
         )
     else:
         train_worker(
-            0, 1, vocab_src, vocab_tgt, spacy_en, config, False
+            0, 1, vocab_src, vocab_tgt, spacy_de, spacy_en, config, False
         )
 
 
-def load_trained_model():
+# def load_trained_model():
+#     model = make_model(len(vocab_src), len(vocab_tgt), N=6)
+#     model.load_state_dict(torch.load("multi30k_model_final.pt", map_location=device))
+#     model.to(device)
+#     return model
+
+
+if __name__ == '__main__':
+    spacy_de, spacy_en = load_tokenizers()
+    vocab_src, vocab_tgt = load_vocab(spacy_de, spacy_en)
+    
+    device = get_device()
     config = {
-        "batch_size": 32,
+        "batch_size": 16 if device.type == 'mps' else 32,  # 减小 MPS 设备的批次大小
         "distributed": False,
         "num_epochs": 8,
         "accum_iter": 10,
         "base_lr": 1.0,
         "max_padding": 72,
         "warmup": 3000,
-        "file_prefix": "en_zh_model_",
+        "file_prefix": "multi30k_model_",
     }
-    model_path = "en_zh_model_final.pt"
-    if not exists(model_path):
-        train_model(vocab_src, vocab_tgt, spacy_en, config)
-
-    device = get_device()
-    model = make_model(len(vocab_src), len(vocab_tgt), N=6)
-    model.load_state_dict(torch.load("en_zh_model_final.pt", map_location=device))
-    model.to(device)
-    return model
-
-
-if __name__ == "__main__":
-    model = load_trained_model() 
+    model_path = "multi30k_model_final.pt"
+    # if not exists(model_path):
+    train_model(vocab_src, vocab_tgt, spacy_de, spacy_en, config)

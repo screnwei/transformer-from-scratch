@@ -224,7 +224,21 @@ def clones(module, N):
 def make_model(
     src_vocab, tgt_vocab, N=6, d_model=512, d_ff=2048, h=8, dropout=0.1
 ):
-    "Helper: Construct a model from hyperparameters."
+    """
+    构建Transformer模型的主要函数
+    
+    参数:
+        src_vocab (int): 源语言词表大小
+        tgt_vocab (int): 目标语言词表大小
+        N (int): 编码器和解码器的层数，默认为6
+        d_model (int): 模型维度，默认为512
+        d_ff (int): 前馈网络中间层维度，默认为2048
+        h (int): 注意力头数，默认为8
+        dropout (float): dropout比率，默认为0.1
+        
+    返回:
+        model (EncoderDecoder): 构建好的Transformer模型
+    """
     c = copy.deepcopy
     attn = MultiHeadedAttention(h, d_model)
     ff = PositionwiseFeedForward(d_model, d_ff, dropout)
@@ -263,3 +277,20 @@ def attention(query, key, value, mask=None, dropout=None):
     if dropout is not None:
         p_attn = dropout(p_attn)
     return torch.matmul(p_attn, value), p_attn
+
+def greedy_decode(model, src, src_mask, max_len, start_symbol):
+    """使用贪心算法进行解码"""
+    memory = model.encode(src, src_mask)
+    ys = torch.ones(1, 1).fill_(start_symbol).type_as(src.data)
+    for i in range(max_len - 1):
+        out = model.decode(
+            memory, src_mask,
+            ys,
+            subsequent_mask(ys.size(1)).type_as(src.data)
+        )
+        prob = model.generator(out[:, -1])
+        _, next_word = torch.max(prob, dim=1)
+        next_word = next_word.data[0]
+        ys = torch.cat([ys,
+                        torch.ones(1, 1).type_as(src.data).fill_(next_word)], dim=1)
+    return ys

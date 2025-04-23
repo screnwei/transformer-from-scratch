@@ -98,11 +98,17 @@ class LabelSmoothing(nn.Module):
 
     def __init__(self, size, padding_idx, smoothing=0.0):
         super(LabelSmoothing, self).__init__()
+        # 使用KL散度作为损失函数，reduction="sum"表示对所有元素求和
         self.criterion = nn.KLDivLoss(reduction="sum")
+        # 填充索引，用于标记序列中的填充位置， '<blank>' 的id
         self.padding_idx = padding_idx
+        # 置信度，表示正确标签的权重，等于1减去平滑因子
         self.confidence = 1.0 - smoothing
+        # 平滑因子，用于标签平滑，均分出去的概率值，得分 e.g. 0.4
         self.smoothing = smoothing
+        # target vocab size 目标语言词表大小
         self.size = size
+        # 存储真实分布，初始化为None
         self.true_dist = None
 
     def forward(self, x, target):

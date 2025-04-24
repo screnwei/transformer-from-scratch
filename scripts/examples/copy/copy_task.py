@@ -2,43 +2,50 @@
 We can begin by trying out a simple copy-task.
 Given a random set of input symbols from a small vocabulary, the goal is to generate back those same symbols.
 """
+import matplotlib.pyplot as plt
 import torch
 from torch.optim.lr_scheduler import LambdaLR
-import matplotlib.pyplot as plt
-import matplotlib as mpl
-
-
-plt.rcParams['font.sans-serif'] = ['Arial Unicode MS']  # 设置中文字体
-plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
 from scripts.train import Batch, LabelSmoothing, rate, run_epoch, DummyOptimizer, DummyScheduler, SimpleLossCompute
-from src.models.transformer import subsequent_mask, make_model, greedy_decode
+from src.models.transformer import make_model, greedy_decode
 
 
-def data_gen(V, batch_size, nbatches):
-    "Generate random data for a src-tgt copy task."
-    """
-        生成随机数据用于训练。它创建了一个大小为batch_size x 10的张量，其中每个元素都是从1到V-1的随机整数。
-        第一列被设置为1，表示起始符号。
-        然后，它将数据克隆并分离为源序列（src）和目标序列（tgt），并返回一个Batch对象。
-    """
+def get_device():
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    elif torch.backends.mps.is_available():
+        return torch.device('mps')
+    else:
+        return torch.device('cpu')
+
+def data_gen(V, batch_size, nbatches, device):
+    """Generate random data for a src-tgt copy task."""
     for i in range(nbatches):
         data = torch.randint(1, V, size=(batch_size, 10))
         data[:, 0] = 1
-        src = data.requires_grad_(False).clone().detach()
-        tgt = data.requires_grad_(False).clone().detach()
+        src = data.clone().detach().requires_grad_(False).to(device)
+        tgt = data.clone().detach().requires_grad_(False).to(device)
         yield Batch(src, tgt, 0)
 
 
 
 # Train the simple copy task.
 def example_simple_model():
+    # 获取训练设备（GPU/MPS/CPU）
+    device = get_device()
+    print(f"Train worker process using device: {device} for training", flush=True)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(device)
+
     V = 11
-    # 损失函数，用于计算损失。它使用LabelSmoothing类，其中size表示词汇表的大小，padding_idx表示填充符号的索引，smoothing表示平滑系数。
-    criterion = LabelSmoothing(size=V, padding_idx=0, smoothing=0.0)
     # 创建了一个Transformer模型，其中：
     # 输入和输出维度都是V N=2 表示使用2层Transformer编码器和解码器
     model = make_model(V, V, N=2)
+    model.to(device)
+
+    # 损失函数，用于计算损失。它使用LabelSmoothing类，其中size表示词汇表的大小，padding_idx表示填充符号的索引，smoothing表示平滑系数。
+    criterion = LabelSmoothing(size=V, padding_idx=0, smoothing=0.0)
+    criterion.to(device)
 
     # 使用Adam优化器，学习率为0.5
     optimizer = torch.optim.Adam(
@@ -62,13 +69,13 @@ def example_simple_model():
     print("-" * 50)
 
     # 训练20个epoch
-    for epoch in range(20):
+    for epoch in range(30):
         # 设置模型为训练模式
         # 在训练模式下，模型会启用dropout等训练时使用的功能
         model.train()
         # 使用data_gen生成数据，并使用run_epoch训练模型。
         train_loss, _ = run_epoch(
-            data_gen(V, batch_size, 20),
+            data_gen(V, batch_size, 20, device),
             model,
             SimpleLossCompute(model.generator, criterion),
             optimizer,
@@ -82,7 +89,7 @@ def example_simple_model():
         # 在评估模式下，模型会关闭dropout等训练时使用的功能
         model.eval()
         eval_loss, _ = run_epoch(
-            data_gen(V, batch_size, 5),
+            data_gen(V, batch_size, 5, device),
             model,
             SimpleLossCompute(model.generator, criterion),
             DummyOptimizer(),
@@ -100,7 +107,13 @@ def example_simple_model():
 
         print("-" * 50)
     print("训练完成！")
-    
+
+    # 将损失值从设备移动到CPU
+    train_losses = [loss.cpu().item() if torch.is_tensor(loss) else loss for loss in train_losses]
+    eval_losses = [loss.cpu().item() if torch.is_tensor(loss) else loss for loss in eval_losses]
+
+    plt.rcParams['font.sans-serif'] = ['Arial Unicode MS']  # 设置中文字体
+    plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
     plt.figure(figsize=(10, 5))
     plt.plot(train_losses, label='训练损失')
     plt.plot(eval_losses, label='验证损失')
@@ -115,19 +128,17 @@ def example_simple_model():
     model.eval()
     print("模型参数：", model.parameters())
 
-    
-
-    # src = torch.LongTensor([[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]])
-    src = torch.LongTensor([[0, 1, 2, 3, 4, 4, 6, 7, 8, 9]])
+    # 创建测试数据并移动到设备
+    src = torch.LongTensor([[0, 1, 2, 3, 4, 4, 6, 7, 2, 9]]).to(device)
     max_len = src.shape[1]
-    src_mask = torch.ones(1, 1, max_len)
+    src_mask = torch.ones(1, 1, max_len).to(device)
 
     print("测试输入：")
-    print("输入序列:", src.tolist()[0])
+    print("输入序列:", src.cpu().tolist()[0])
     print("序列长度:", max_len)
     print("掩码形状:", src_mask.shape)
-    print("输入张量值:", src)
-    print("掩码张量值:", src_mask)
+    print("输入张量值:", src.cpu())
+    print("掩码张量值:", src_mask.cpu())
 
     print("测试模型输出：")
     print(greedy_decode(model, src, src_mask, max_len=max_len, start_symbol=0))

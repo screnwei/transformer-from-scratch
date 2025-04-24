@@ -256,6 +256,10 @@ def make_model(
     for p in model.parameters():
         if p.dim() > 1:
             nn.init.xavier_uniform_(p)
+
+    # Print the total number of parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Total number of parameters in the model: {total_params:,}")
     return model
 
 def subsequent_mask(size):

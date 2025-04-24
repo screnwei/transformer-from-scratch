@@ -94,9 +94,20 @@ class TrainState:
 
 
 class LabelSmoothing(nn.Module):
-    "Implement label smoothing. 最终计算损失函数"
+    """标签平滑（Label Smoothing）实现。
+    这是一种正则化技术，用于防止模型在训练时对预测结果过于自信。
+    通过将一部分概率分配给非目标类别，使模型预测更加平滑。
+    """
 
     def __init__(self, size, padding_idx, smoothing=0.0):
+        """
+        初始化标签平滑模块
+        
+        Args:
+            size: 目标词表大小
+            padding_idx: 填充token的索引
+            smoothing: 平滑因子，控制标签平滑的程度
+        """
         super(LabelSmoothing, self).__init__()
         # 使用KL散度作为损失函数，reduction="sum"表示对所有元素求和
         self.criterion = nn.KLDivLoss(reduction="sum")
@@ -112,33 +123,90 @@ class LabelSmoothing(nn.Module):
         self.true_dist = None
 
     def forward(self, x, target):
+        """
+        前向传播，计算标签平滑后的损失
+        
+        Args:
+            x: 模型预测的log概率分布，形状为 [batch_size, vocab_size]
+            target: 目标标签，形状为 [batch_size]
+            
+        Returns:
+            计算得到的KL散度损失
+        """
+        # 确保预测分布的大小与词表大小一致
         assert x.size(1) == self.size
+        
+        # 创建真实分布
         true_dist = x.data.clone()
+        # 将平滑因子均匀分配给所有非目标类别
+        # (self.size - 2) 是因为要排除目标类别和填充token
         true_dist.fill_(self.smoothing / (self.size - 2))
+        
+        # 将置信度分配给目标类别
+        # unsqueeze(1) 将target从[batch_size]变为[batch_size, 1]
         true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
+        
+        # 将填充位置的概率设为0
         true_dist[:, self.padding_idx] = 0
+        
+        # 处理填充位置
         mask = torch.nonzero(target.data == self.padding_idx)
         if mask.dim() > 0:
+            # 将填充位置对应的分布设为0
             true_dist.index_fill_(0, mask.squeeze(), 0.0)
+            
+        # 保存真实分布用于可视化或调试
         self.true_dist = true_dist
+        
+        # 计算KL散度损失
         return self.criterion(x, true_dist.clone().detach())
 
 
 class SimpleLossCompute:
-    "A simple loss compute and train function."
+    """一个简单的损失计算和训练函数类。
+    这个类主要用于计算Transformer模型的损失，并返回用于反向传播的损失值。
+    """
 
     def __init__(self, generator, criterion):
-        self.generator = generator
-        self.criterion = criterion
+        """
+        初始化损失计算器
+        
+        Args:
+            generator: 生成器，用于将模型输出转换为预测分布
+            criterion: 损失函数，用于计算预测分布和真实标签之间的差异
+        """
+        self.generator = generator  # 生成器实例
+        self.criterion = criterion  # 损失函数实例
 
     def __call__(self, x, y, norm):
+        """
+        计算损失值，每次对象被当作函数调用时都会执行
+        
+        Args:
+            x: 模型输出，形状为 [batch_size, seq_len, vocab_size]
+            y: 目标标签，形状为 [batch_size, seq_len]
+            norm: 归一化因子，通常是批次中的token数量
+            
+        Returns:
+            tuple: (未归一化的损失值, 用于反向传播的损失节点)
+        """
+        # 使用生成器将模型输出转换为预测分布
         x = self.generator(x)
+        
+        # 计算损失
+        # 1. 将输入张量重塑为二维：[batch_size * seq_len, vocab_size]
+        # 2. 将目标标签重塑为一维：[batch_size * seq_len]
+        # 3. 计算损失并除以归一化因子
         sloss = (
+            #此处会调用 LabelSmoothing 的 forward 方法
             self.criterion(
-                x.contiguous().view(-1, x.size(-1)), y.contiguous().view(-1)
+                x.contiguous().view(-1, x.size(-1)),  # 重塑预测分布
+                y.contiguous().view(-1)               # 重塑目标标签
             )
-            / norm
+            / norm  # 归一化损失
         )
+        
+        # 返回未归一化的损失值和用于反向传播的损失节点
         return sloss.data * norm, sloss
 
 class DummyOptimizer(torch.optim.Optimizer):
@@ -158,51 +226,56 @@ class DummyScheduler:
         None
 
 
-def loss(x, crit):
-    d = x + 3 * 1
-    predict = torch.FloatTensor([[0, x / d, 1 / d, 1 / d, 1 / d]])
-    return crit(predict.log(), torch.LongTensor([1])).data
-
 def run_epoch(
-    data_iter,
-    model,
-    loss_compute,
-    optimizer,
-    scheduler,
-    mode="train",
-    accum_iter=1,
-    train_state=TrainState(),
+    data_iter,        # 数据迭代器，用于遍历训练数据
+    model,            # Transformer模型实例
+    loss_compute,     # 损失计算函数
+    optimizer,        # 优化器
+    scheduler,        # 学习率调度器
+    mode="train",     # 运行模式：train/train+log/eval
+    accum_iter=1,     # 梯度累积的步数
+    train_state=TrainState(),  # 训练状态跟踪器
 ):
-    """Train a single epoch"""
-    start = time.time()
-    total_tokens = 0
-    total_loss = 0
-    tokens = 0
-    n_accum = 0
+    """训练单个epoch"""
+    start = time.time()  # 记录开始时间
+    total_tokens = 0     # 总token数
+    total_loss = 0       # 总损失
+    tokens = 0           # 当前批次的token数
+    n_accum = 0          # 梯度累积计数器
+    
+    # 遍历数据迭代器中的每个批次
     for i, batch in enumerate(data_iter):
+        # 前向传播：计算模型输出
         out = model.forward(
             batch.src, batch.tgt, batch.src_mask, batch.tgt_mask
         )
+        # 计算损失
         loss, loss_node = loss_compute(out, batch.tgt_y, batch.ntokens)
-        # loss_node = loss_node / accum_iter
+        
+        # 如果是训练模式，执行反向传播和参数更新
         if mode == "train" or mode == "train+log":
-            loss_node.backward()
-            train_state.step += 1
-            train_state.samples += batch.src.shape[0]
-            train_state.tokens += batch.ntokens
+            loss_node.backward()  # 反向传播
+            train_state.step += 1  # 更新步数
+            train_state.samples += batch.src.shape[0]  # 更新样本数
+            train_state.tokens += batch.ntokens  # 更新token数
+            
+            # 达到累积步数时更新参数
             if i % accum_iter == 0:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-                n_accum += 1
-                train_state.accum_step += 1
-            scheduler.step()
+                optimizer.step()  # 更新参数
+                optimizer.zero_grad(set_to_none=True)  # 清空梯度
+                n_accum += 1  # 更新累积计数器
+                train_state.accum_step += 1  # 更新累积步数
+            scheduler.step()  # 更新学习率
 
+        # 更新统计信息
         total_loss += loss
         total_tokens += batch.ntokens
         tokens += batch.ntokens
+        
+        # 每40个批次打印一次训练信息
         if i % 40 == 1 and (mode == "train" or mode == "train+log"):
-            lr = optimizer.param_groups[0]["lr"]
-            elapsed = time.time() - start
+            lr = optimizer.param_groups[0]["lr"]  # 获取当前学习率
+            elapsed = time.time() - start  # 计算耗时
             print(
                 (
                     "Epoch Step: %6d | Accumulation Step: %3d | Loss: %6.2f "
@@ -210,10 +283,14 @@ def run_epoch(
                 )
                 % (i, n_accum, loss / batch.ntokens, tokens / elapsed, lr)
             )
-            start = time.time()
-            tokens = 0
+            start = time.time()  # 重置计时器
+            tokens = 0  # 重置token计数
+            
+        # 清理内存
         del loss
         del loss_node
+        
+    # 返回平均损失和训练状态
     return total_loss / total_tokens, train_state
 
 def rate(step, model_size, factor, warmup):

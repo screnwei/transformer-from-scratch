@@ -73,9 +73,6 @@ def main():
     spacy_de, spacy_en = load_tokenizers()
     vocab_src, vocab_tgt = load_vocab("scripts/examples/translation_de2en/vocab.pt")
     model = load_model("scripts/examples/translation_de2en/multi30k_model_final.pt", vocab_src, vocab_tgt)
-    # Print the total number of parameters
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"Total number of parameters in the model: {total_params:,}")
 
     # 测试句子
     test_sentences = [

@@ -35,3 +35,7 @@ PYTHONPATH=$PYTHONPATH:. python scripts/examples/translation_task.py
 pip uninstall torch
 pip install torch==2.1.2 --extra-index-url https://download.pytorch.org/whl/cu118
 ```
+
+参考：
+* https://nlp.seas.harvard.edu/annotated-transformer/
+* https://zhuanlan.zhihu.com/p/105493618

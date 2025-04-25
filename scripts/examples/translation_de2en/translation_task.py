@@ -154,12 +154,6 @@ def load_vocab(spacy_de, spacy_en):
     return vocab_src, vocab_tgt
 
 
-
-"""
-Batching matters a ton for speed. We want to have very evenly divided batches, with absolutely minimal padding. 
-To do this we have to hack a bit around the default torchtext batching. 
-This code patches their default batching to make sure we search over enough sentences to find tight batches.
-"""
 def collate_batch(
     batch,                # 输入批次数据
     src_pipeline,         # 源语言（德语）处理管道，对应的就是tokenize_de
@@ -182,6 +176,33 @@ def collate_batch(
         device: 训练设备
         max_padding: 序列最大长度
         pad_id: 填充标记的索引
+        
+    转换过程示例：
+    假设有一个批次包含一个句子对：
+    源语言（德语）: "Ein Mann läuft."
+    目标语言（英语）: "A man is running."
+    
+    1. 分词：
+       src_tokens = ["Ein", "Mann", "läuft", "."]
+       tgt_tokens = ["A", "man", "is", "running", "."]
+    
+    2. 转换为词表索引（假设词表映射）：
+       src_indices = [10, 20, 30, 40]  # 每个词对应的索引
+       tgt_indices = [50, 60, 70, 80, 90]
+    
+    3. 添加特殊标记：
+       src_with_markers = [0, 10, 20, 30, 40, 1]  # 0是开始标记，1是结束标记
+       tgt_with_markers = [0, 50, 60, 70, 80, 90, 1]
+    
+    4. 填充到固定长度（假设max_padding=10）：
+       src_padded = [0, 10, 20, 30, 40, 1, 2, 2, 2, 2]  # 2是填充标记
+       tgt_padded = [0, 50, 60, 70, 80, 90, 1, 2, 2, 2]
+    
+    5. 转换为张量：
+       src_tensor = torch.tensor(src_padded)
+       tgt_tensor = torch.tensor(tgt_padded)
+    
+    最终返回形状为 [batch_size, max_padding] 的张量对
     """
     
     # 创建特殊标记的张量
@@ -418,6 +439,14 @@ def train_worker(
         # 训练阶段
         model.train()
         print(f"[GPU{gpu}] Epoch {epoch} Training ====", flush=True)
+
+
+        # 查看训练数据加载器中的第一批数据，（无实际用处，只是为了了解 dataloader中的元素）
+        for i, batch in enumerate(train_dataloader):
+            if i == 0:  # 只查看第一批数据
+                print(f"批次数据形状: 源语言: {batch[0].shape}, 目标语言: {batch[1].shape} | 示例数据: 源语言: {batch[0][0]}, 目标语言: {batch[1][0]}")
+                break
+
         _, train_state = run_epoch(
             (Batch(b[0], b[1], pad_idx) for b in train_dataloader),
             model,

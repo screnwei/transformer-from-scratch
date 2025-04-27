@@ -176,6 +176,7 @@ class MultiHeadedAttention(nn.Module):
         # 确保 d_model 能被 h 整除
         assert d_model % h == 0
         # 每个头的维度
+        # eg: d_k=512//8=64
         self.d_k = d_model // h
         # 注意力头的数量
         self.h = h
@@ -250,18 +251,74 @@ class MultiHeadedAttention(nn.Module):
 
 class SublayerConnection(nn.Module):
     """
-    A residual connection followed by a layer norm.
-    Note for code simplicity the norm is first as opposed to last.
+    子层连接模块，实现了 Transformer 中的残差连接和层归一化。
+    
+    该模块的主要功能是：
+    1. 对输入进行层归一化
+    2. 应用子层（如注意力层或前馈网络）
+    3. 应用 dropout
+    4. 添加残差连接
+    
+    数学公式：
+    output = x + dropout(sublayer(layer_norm(x)))
+    
+    其中：
+    - x: 输入张量
+    - layer_norm: 层归一化
+    - sublayer: 子层（如注意力层或前馈网络）
+    - dropout: 随机丢弃部分激活值
+    
+    注意：为了代码简洁，这里先进行层归一化，再进行子层处理。
+    这与原始论文中的顺序略有不同，但效果相似。
     """
 
     def __init__(self, size, dropout):
+        """
+        初始化子层连接模块
+        
+        参数:
+            size (int): 输入特征的维度，即需要归一化的特征数量
+            dropout (float): dropout 比率，用于防止过拟合
+        """
+        # eg： size=d_model=512; dropout=0.1
         super(SublayerConnection, self).__init__()
+        # 创建层归一化模块，用于对输入进行归一化
         self.norm = LayerNorm(size)
+        # 创建 dropout 层，用于随机丢弃部分激活值
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, sublayer):
-        "Apply residual connection to any sublayer with the same size."
+        """
+        前向传播函数，实现残差连接
+        
+        参数:
+            x (torch.Tensor): 输入张量，形状为 [batch_size, seq_len, features]
+            sublayer (callable): 子层函数，如注意力层或前馈网络
+            
+        返回:
+            torch.Tensor: 经过残差连接处理后的张量，形状与输入相同
+            
+        处理流程:
+        1. 对输入进行层归一化
+        2. 应用子层处理
+        3. 应用 dropout
+        4. 添加残差连接
+        """
+
+        # eg：sublayer是一个具体的MultiHeadAttention 或者 PositionwiseFeedForward对象
+
+        # 实现残差连接：x + dropout(sublayer(layer_norm(x)))
+        # 1. 先对输入进行层归一化
+        # 2. 然后应用子层处理
+        # 3. 应用 dropout 随机丢弃部分激活值
+        # 4. 最后添加残差连接
+
+        # eg：x (30, 10, 512) -> norm (LayerNorm) -> (30, 10, 512) -> sublayer (MultiHeadAttention or PositionwiseFeedForward)
+        # -> (30, 10, 512) -> dropout -> (30, 10, 512)
+        # 然后输入的x（没有走sublayer) + 上面的结果，
+        # 即实现了残差相加的功能
         return x + self.dropout(sublayer(self.norm(x)))
+
 
 class PositionwiseFeedForward(nn.Module):
     """
@@ -303,10 +360,14 @@ class PositionwiseFeedForward(nn.Module):
         2. 创建第二层线性变换：d_ff -> d_model
         3. 创建 dropout 层
         """
+        # eg：d_model = 512
+        # eg：d_ff = 2048 = 512*4
         super(PositionwiseFeedForward, self).__init__()
         # 第一层线性变换：将输入从 d_model 维度扩展到 d_ff 维度
+        # eg：构建第一个全连接层，(512, 2048)，其中有两种可训练参数： weights矩阵，(512, 2048)，以及 biases偏移向量, (2048)
         self.w_1 = nn.Linear(d_model, d_ff)
         # 第二层线性变换：将特征从 d_ff 维度压缩回 d_model 维度
+        # eg：构建第二个全连接层，(2048, 512)，其中有两种可训练参数： weights矩阵，(2048, 512)，以及 biases偏移向量, (512)
         self.w_2 = nn.Linear(d_ff, d_model)
         # dropout 层，用于防止过拟合
         self.dropout = nn.Dropout(dropout)
@@ -325,91 +386,350 @@ class PositionwiseFeedForward(nn.Module):
         返回:
             torch.Tensor: 经过前馈网络处理后的张量，形状与输入相同 [batch_size, seq_len, d_model]
 
+            FFN(x)=max(0,xW1+b1)W2+b2
+            其中max(0, xW1 + b1) 是一个ReLU激活函数
+
         处理流程：
         1. 第一层线性变换：xW1 + b1
         2. ReLU 激活函数：max(0, xW1 + b1)
         3. Dropout：随机丢弃部分激活值
         4. 第二层线性变换：(xW1 + b1)W2 + b2
         """
-        # 1. 第一层线性变换：xW1 + b1
-        # 2. ReLU 激活函数：max(0, xW1 + b1)
-        # 3. Dropout：随机丢弃部分激活值
-        # 4. 第二层线性变换：(xW1 + b1)W2 + b2
+
+        # eg： x shape = (batch.size, sequence.len, 512)， 例如, (30, 10, 512)
+        # eg： x (30, 10, 512) -> self.w_1 -> (30, 10, 2048) -> relu -> (30, 10, 2048) -> dropout -> (30, 10, 2048) -> self.w_2 -> (30, 10, 512)是输出的shape
+
         return self.w_2(self.dropout(self.w_1(x).relu()))
 
 class EncoderLayer(nn.Module):
-    "Encoder is made up of self-attn and feed forward (defined below)"
+    """
+    编码器层，是 Transformer 编码器的基本组成单元。
+    
+    每个编码器层包含两个子层：
+    1. 自注意力层（Self-Attention）：用于捕获输入序列中各个位置之间的关系
+    2. 前馈神经网络层（Feed Forward）：对每个位置的特征进行非线性变换
+    
+    每个子层都使用了残差连接（Residual Connection）和层归一化（Layer Normalization）
+    来帮助训练更深的网络。
+    
+    参数:
+        size (int): 输入特征的维度，即模型维度 d_model
+        self_attn (MultiHeadedAttention): 多头自注意力机制模块
+        feed_forward (PositionwiseFeedForward): 位置前馈神经网络模块
+        dropout (float): dropout 比率，用于防止过拟合
+    """
 
     def __init__(self, size, self_attn, feed_forward, dropout):
         super(EncoderLayer, self).__init__()
+        # 保存自注意力机制模块
         self.self_attn = self_attn
+        # 保存前馈神经网络模块
         self.feed_forward = feed_forward
+        # 创建两个子层连接模块，分别用于自注意力和前馈网络
+        # 每个子层连接都包含残差连接和层归一化
         self.sublayer = clones(SublayerConnection(size, dropout), 2)
+        # 保存模型维度
         self.size = size
 
     def forward(self, x, mask):
-        "Follow Figure 1 (left) for connections."
+        """
+        前向传播函数，实现编码器层的计算流程
+        
+        参数:
+            x (torch.Tensor): 输入张量，形状为 [batch_size, seq_len, d_model]
+            eg： x shape = (30, 10, 512)
+
+            mask (torch.Tensor): 注意力掩码，用于屏蔽某些位置
+            eg：mask 是(batch.size, 10,10)的矩阵，类似于当前一个词w，有哪些词是w可见的，源语言的序列的话，所有其他词都可见，除了"<blank>"这样的填充；目标语言的序列的话，所有w的左边的词，都可见。
+            
+        返回:
+            torch.Tensor: 编码器层的输出，形状与输入相同
+            
+        处理流程:
+        1. 第一个子层：自注意力机制 + 残差连接 + 层归一化
+        2. 第二个子层：前馈神经网络 + 残差连接 + 层归一化
+        """
+        # 第一个子层：自注意力机制
+        # lambda x: self.self_attn(x, x, x, mask) 表示对输入进行自注意力计算
+        # 其中 query=key=value=x，表示自注意力机制
+
+        # eg：x (30, 10, 512) -> self_attn (MultiHeadAttention)，shape is same (30, 10, 512) -> SublayerConnection -> (30, 10, 512)
+
+        # 使用了lambda来定义一个匿名函数，展开类似于：
+        # def lambda1(self, x, mask):
+        #   return self.self_attn(x, x, x, mask)
         x = self.sublayer[0](x, lambda x: self.self_attn(x, x, x, mask))
+        # 第二个子层：前馈神经网络
         return self.sublayer[1](x, self.feed_forward)
 
 class LayerNorm(nn.Module):
-    "Construct a layernorm module (See citation for details)."
+    """
+    层归一化（Layer Normalization）模块，用于对神经网络中的每一层进行归一化处理。
+    
+    层归一化是一种常用的归一化技术，它能够：
+    1. 加速模型训练
+    2. 提高模型稳定性
+    3. 减少对初始化的依赖
+    4. 使模型对输入尺度的变化更加鲁棒
+    
+    数学公式：
+    y = a * (x - mean) / (std + eps) + b
+    
+    其中：
+    - x: 输入张量
+    - mean: 输入张量的均值
+    - std: 输入张量的标准差
+    - eps: 防止除零的小常数
+    - a: 可学习的缩放参数
+    - b: 可学习的偏置参数
+    
+    与BatchNorm的区别：
+    1. LayerNorm在特征维度上进行归一化，而不是批次维度
+    2. 不依赖于批次大小，更适合处理变长序列
+    3. 在训练和推理时行为一致，不需要额外的统计信息
+    """
 
     def __init__(self, features, eps=1e-6):
+        """
+        初始化层归一化模块
+        
+        参数:
+            features (int): 输入特征的维度，即需要归一化的特征数量
+            eps (float): 防止除零的小常数，默认为1e-6。这个值用于在计算标准差时
+                        防止分母为零，保证数值稳定性
+        """
+        #eg： features=d_model=512, eps=epsilon 用于分母的非0化平滑
         super(LayerNorm, self).__init__()
+        # 可学习的缩放参数，初始化为全1向量
+        # 这个参数允许模型学习最优的缩放因子，用于调整归一化后的特征范围
+        # eg：a_2 是一个可训练参数向量，(512)
         self.a_2 = nn.Parameter(torch.ones(features))
+        # 可学习的偏置参数，初始化为全0向量
+        # 这个参数允许模型学习最优的偏置，用于调整归一化后的特征中心
+        # eg：b_2 也是一个可训练参数向量, (512)
         self.b_2 = nn.Parameter(torch.zeros(features))
+        # 防止除零的小常数，用于数值稳定性
         self.eps = eps
 
     def forward(self, x):
+        """
+        前向传播函数，对输入张量进行层归一化
+        
+        参数:
+            x (torch.Tensor): 输入张量，形状为 [batch_size, seq_len, features]
+                其中：
+                - batch_size: 批次大小
+                - seq_len: 序列长度
+                - features: 特征维度
+            
+        返回:
+            torch.Tensor: 归一化后的张量，形状与输入相同 [batch_size, seq_len, features]
+            
+        处理流程:
+        1. 计算输入张量在最后一个维度（特征维度）上的均值
+        2. 计算输入张量在最后一个维度上的标准差
+        3. 应用层归一化公式：y = a * (x - mean) / (std + eps) + b
+        """
+        # 计算输入张量在最后一个维度上的均值，保持维度不变
+        # 使用keepdim=True保持维度，便于后续的广播操作
+        # eg：x 的形状为(batch.size, sequence.len, 512)
         mean = x.mean(-1, keepdim=True)
+        # 计算输入张量在最后一个维度上的标准差，保持维度不变
+        # eg：对x的最后一个维度，取标准方差，得(batch.size, seq.len)
         std = x.std(-1, keepdim=True)
+        # 应用层归一化公式
+        # 1. 减去均值进行中心化
+        # 2. 除以标准差进行缩放
+        # 3. 应用可学习的缩放和偏置参数
+        # eg: 本质上类似于（x - mean) / std，不过这里加入了两个可训练向量 a_2 and b_2，以及分母上增加一个极小值epsilon，用来防止std为0的时候的除法溢出
         return self.a_2 * (x - mean) / (std + self.eps) + self.b_2
 
 class Encoder(nn.Module):
-    "Core encoder is a stack of N layers"
+    """
+    Transformer 的编码器模块，由 N 个相同的编码器层堆叠而成。
+    
+    编码器的主要功能是将输入序列转换为高维特征表示，这个表示包含了序列中各个位置之间的语义关系和上下文信息。
+    
+    参数:
+        layer (EncoderLayer): 编码器层的实例，将被复制 N 次
+        N (int): 编码器层的数量，通常为 6
+    
+    处理流程:
+    1. 输入序列经过 N 个编码器层的逐层处理
+    2. 每个编码器层都包含自注意力机制和前馈神经网络
+    3. 最后对输出进行层归一化
+    
+    示例:
+        # 假设输入序列长度为 10，batch_size 为 30，模型维度为 512
+        x = torch.randn(30, 10, 512)  # [batch_size, seq_len, d_model]
+        mask = torch.ones(30, 10, 10)  # [batch_size, seq_len, seq_len]
+        encoder = Encoder(EncoderLayer(512, self_attn, feed_forward, 0.1), 6)
+        output = encoder(x, mask)  # [30, 10, 512]
+    """
 
     def __init__(self, layer, N):
+        """
+        初始化编码器
+
+        参数:
+            layer (EncoderLayer): 编码器层的实例，one EncoderLayer object
+            N (int): 编码器层的数量 N=6
+        """
         super(Encoder, self).__init__()
+        # 复制 N 个相同的编码器层
+        # 每个层都是独立的，不共享参数
         self.layers = clones(layer, N)
+        # 创建最终的层归一化模块
         self.norm = LayerNorm(layer.size)
 
     def forward(self, x, mask):
-        "Pass the input (and mask) through each layer in turn."
+        """
+        前向传播函数，实现编码器的计算流程
+        
+        参数:
+            x (torch.Tensor): 输入张量，形状为 [batch_size, seq_len, d_model]
+                eg: x shape = (30, 10, 512)
+            mask (torch.Tensor): 注意力掩码，用于屏蔽某些位置
+                eg: mask shape = (30, 10, 10)
+            
+        返回:
+            torch.Tensor: 编码器的输出，形状与输入相同 [batch_size, seq_len, d_model]
+            
+        处理流程:
+        1. 将输入依次通过 N 个编码器层
+        2. 每个编码器层都包含：
+           - 自注意力机制：捕获序列中各个位置之间的关系
+           - 前馈神经网络：对每个位置的特征进行非线性变换
+        3. 最后对输出进行层归一化
+        """
+        # 依次通过每个编码器层
         for layer in self.layers:
             x = layer(x, mask)
-        return self.norm(x)
-
-class Decoder(nn.Module):
-    "Generic N layer decoder with masking."
-
-    def __init__(self, layer, N):
-        super(Decoder, self).__init__()
-        self.layers = clones(layer, N)
-        self.norm = LayerNorm(layer.size)
-
-    def forward(self, x, memory, src_mask, tgt_mask):
-        for layer in self.layers:
-            x = layer(x, memory, src_mask, tgt_mask)
+        # 对最终输出进行层归一化
         return self.norm(x)
 
 class DecoderLayer(nn.Module):
     "Decoder is made of self-attn, src-attn, and feed forward (defined below)"
+
+    """
+    解码器层，是 Transformer 解码器的基本组成单元。
+    
+    每个解码器层包含三个子层：
+    1. 自注意力层（Self-Attention）：用于捕获目标序列中各个位置之间的关系
+    2. 源-目标注意力层（Source-Target Attention）：用于捕获源序列和目标序列之间的关系
+    3. 前馈神经网络层（Feed Forward）：对每个位置的特征进行非线性变换
+    
+    每个子层都使用了残差连接（Residual Connection）和层归一化（Layer Normalization）来帮助训练更深的网络。
+    
+    参数:
+        size (int): 输入特征的维度，即模型维度 d_model
+        self_attn (MultiHeadedAttention): 多头自注意力机制模块
+        src_attn (MultiHeadedAttention): 多头源-目标注意力机制模块
+        feed_forward (PositionwiseFeedForward): 位置前馈神经网络模块
+        dropout (float): dropout 比率，用于防止过拟合
+    """
     def __init__(self, size, self_attn, src_attn, feed_forward, dropout):
         super(DecoderLayer, self).__init__()
+        # eg：size = d_model=512
         self.size = size
+        # eg：self_attn = one MultiHeadAttention object，目标语言序列的
         self.self_attn = self_attn
+        # eg：src_attn = second MultiHeadAttention object, 目标语言序列和源语言序列之间的
         self.src_attn = src_attn
+        # eg：feed_forward 一个全连接层
         self.feed_forward = feed_forward
+        # eg：需要三个SublayerConnection, 分别在self.self_attn, self.src_attn, 和self.feed_forward的后边
         self.sublayer = clones(SublayerConnection(size, dropout), 3)
 
     def forward(self, x, memory, src_mask, tgt_mask):
         "Follow Figure 1 (right) for connections."
+        """
+        前向传播函数，实现解码器层的计算流程
+        
+        参数:
+            x (torch.Tensor): 目标序列输入，形状为 [batch_size, seq_len, d_model]
+            memory (torch.Tensor): 编码器的输出（记忆），形状为 [batch_size, seq_len, d_model]
+            src_mask (torch.Tensor): 源序列的注意力掩码，用于屏蔽某些位置
+            tgt_mask (torch.Tensor): 目标序列的注意力掩码，用于屏蔽某些位置
+            
+        返回:
+            torch.Tensor: 解码器层的输出，形状与输入相同
+            
+        处理流程:
+        1. 第一个子层：自注意力机制 + 残差连接 + 层归一化
+        2. 第二个子层：源-目标注意力机制 + 残差连接 + 层归一化
+        3. 第三个子层：前馈神经网络 + 残差连接 + 层归一化
+        """
+
+        # eg：来自源语言序列的Encoder之后的输出，作为memory，供目标语言的序列检索匹配：（类似于alignment in SMT)
         m = memory
+        # eg：通过一个匿名函数，来实现目标序列的自注意力编码，结果扔给sublayer[0]:SublayerConnection
         x = self.sublayer[0](x, lambda x: self.self_attn(x, x, x, tgt_mask))
+        # eg：通过第二个匿名函数，来实现目标序列和源序列的注意力计算，结果扔给sublayer[1]:SublayerConnection
         x = self.sublayer[1](x, lambda x: self.src_attn(x, m, m, src_mask))
+        # eg：接一个全连接层，然后结果扔给sublayer[2]:SublayerConnection
         return self.sublayer[2](x, self.feed_forward)
 
+class Decoder(nn.Module):
+    """
+    Transformer 的解码器模块，由 N 个相同的解码器层堆叠而成。
+    
+    解码器的主要功能是基于编码器的输出（memory）和已生成的目标序列，预测下一个词的概率分布。
+    
+    参数:
+        layer (DecoderLayer): 解码器层的实例，将被复制 N 次
+        N (int): 解码器层的数量，通常为 6
+    
+    处理流程:
+    1. 输入序列经过 N 个解码器层的逐层处理
+    2. 每个解码器层都包含：
+       - 自注意力机制：捕获目标序列中各个位置之间的关系
+       - 源-目标注意力机制：捕获源序列和目标序列之间的关系
+       - 前馈神经网络：对每个位置的特征进行非线性变换
+    3. 最后对输出进行层归一化
+    """
+
+    def __init__(self, layer, N):
+        """
+        初始化解码器
+        
+        参数:
+            layer (DecoderLayer): 解码器层的实例
+            N (int): 解码器层的数量
+        """
+        super(Decoder, self).__init__()
+        # 复制 N 个相同的解码器层
+        # 每个层都是独立的，不共享参数
+        self.layers = clones(layer, N)
+        # 创建最终的层归一化模块
+        self.norm = LayerNorm(layer.size)
+
+    def forward(self, x, memory, src_mask, tgt_mask):
+        """
+        前向传播函数，实现解码器的计算流程
+        
+        参数:
+            x (torch.Tensor): 目标序列输入，形状为 [batch_size, seq_len, d_model]
+            memory (torch.Tensor): 编码器的输出（记忆），形状为 [batch_size, seq_len, d_model]
+            src_mask (torch.Tensor): 源序列的注意力掩码，用于屏蔽某些位置
+            tgt_mask (torch.Tensor): 目标序列的注意力掩码，用于屏蔽某些位置
+            
+        返回:
+            torch.Tensor: 解码器的输出，形状与输入相同 [batch_size, seq_len, d_model]
+            
+        处理流程:
+        1. 将输入依次通过 N 个解码器层
+        2. 每个解码器层都包含：
+           - 自注意力机制：捕获目标序列中各个位置之间的关系
+           - 源-目标注意力机制：捕获源序列和目标序列之间的关系
+           - 前馈神经网络：对每个位置的特征进行非线性变换
+        3. 最后对输出进行层归一化
+        """
+        # 依次通过每个解码器层
+        for layer in self.layers:
+            x = layer(x, memory, src_mask, tgt_mask)
+        # 对最终输出进行层归一化
+        return self.norm(x)
 
 class Generator(nn.Module):
     """
@@ -430,6 +750,8 @@ class Generator(nn.Module):
             d_model (int): 模型维度，即解码器输出的维度
             vocab (int): 词表大小，即预测的类别数
         """
+
+        # eg：d_model=512， vocab = 目标语言词表大小
         super(Generator, self).__init__()
         # 线性投影层，将 d_model 维向量映射到词表大小
         self.proj = nn.Linear(d_model, vocab)
@@ -444,6 +766,8 @@ class Generator(nn.Module):
         返回:
             torch.Tensor: 经过 log_softmax 后的预测结果，形状为 [batch_size, seq_len, vocab]
         """
+        # eg：x (30, 10, 512) -> self.proj (Linear) -> (30, 10, 目标语言词表大小)
+        # 然后应用log_softmax函数，得到每个词的概率分布 (30, 10, 目标语言词表大小)
         return log_softmax(self.proj(x), dim=-1)
 
 class EncoderDecoder(nn.Module):
@@ -490,6 +814,7 @@ class EncoderDecoder(nn.Module):
         返回:
             解码器的输出
         """
+        # eg：先对源语言序列进行编码，结果作为memory传递给目标语言的编码器
         return self.decode(self.encode(src, src_mask), src_mask, tgt, tgt_mask)
 
     def encode(self, src, src_mask):
@@ -503,6 +828,7 @@ class EncoderDecoder(nn.Module):
         返回:
             编码后的源序列表示
         """
+        # eg：对源语言序列进行编码，得到的结果为(batch.size, seq.length, 512)的tensor
         return self.encoder(self.src_embed(src), src_mask)
 
     def decode(self, memory, src_mask, tgt, tgt_mask):
@@ -518,11 +844,13 @@ class EncoderDecoder(nn.Module):
         返回:
             解码器的输出
         """
+        # eg：对目标语言序列进行解码，得到的结果为(batch.size, seq.length, 512)的tensor
         return self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
 
 
 def clones(module, N):
     "Produce N identical layers."
+    # 网络的深copy，完全分离，不分享任何存储空间：（从而保证可训练参数，都有自己的取值，梯度）
     return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
 
 def make_model(
@@ -567,11 +895,34 @@ def make_model(
     return model
 
 def subsequent_mask(size):
-    "Mask out subsequent positions."
+    """
+    生成后续位置掩码（subsequent mask），用于在解码器中屏蔽未来位置的信息。
+    
+    在 Transformer 的解码器中，为了确保模型在生成序列时只能看到当前位置之前的信息，
+    需要使用掩码来屏蔽未来位置的信息。这个掩码是一个上三角矩阵，对角线及以下为 1，
+    以上为 0。
+    
+    参数:
+        size (int): 序列的长度
+        
+    返回:
+        torch.Tensor: 形状为 [1, size, size] 的掩码张量，其中：
+            - 1 表示允许访问的位置
+            - 0 表示被屏蔽的位置
+            
+    示例:
+        >>> subsequent_mask(3)
+        tensor([[[1, 0, 0],
+                 [1, 1, 0],
+                 [1, 1, 1]]], dtype=torch.uint8)
+    """
+    # 创建掩码张量的形状 [1, size, size]
     attn_shape = (1, size, size)
+    # 生成上三角矩阵，对角线及以下为 1，以上为 0
     subsequent_mask = torch.triu(torch.ones(attn_shape), diagonal=1).type(
         torch.uint8
     )
+    # 将掩码取反，使得对角线及以下为 1，以上为 0
     return subsequent_mask == 0
 
 
